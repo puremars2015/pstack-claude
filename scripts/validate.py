@@ -1,0 +1,92 @@
+"""Validate package structure, local references and optional workflow configuration.
+
+Authoring check only: requires PyYAML and jsonschema. Skills and log.py have no
+third-party runtime dependencies.
+"""
+from pathlib import Path
+import argparse
+import json
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+import yaml
+import jsonschema
+
+ALLOWED_FRONTMATTER = {'name', 'description', 'disable-model-invocation'}
+# Only setup-pstack may be loaded by the model on its own; everything else is user-invoked.
+MODEL_INVOCABLE = {'setup-pstack'}
+
+
+def validate(root, config=None):
+    root = root.resolve()
+    errors = []
+    manifest = json.loads((root / '.claude-plugin/plugin.json').read_text(encoding='utf-8'))
+    marketplace = json.loads((root / '.claude-plugin/marketplace.json').read_text(encoding='utf-8'))
+    if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', manifest.get('name', '')):
+        errors.append('Invalid plugin name')
+    if not re.fullmatch(r'\d+\.\d+\.\d+', manifest.get('version', '')):
+        errors.append('Invalid package version')
+    if not isinstance(manifest.get('description'), str) or not manifest['description'].strip():
+        errors.append('Missing plugin description')
+    listed = [p for p in marketplace.get('plugins', []) if p.get('name') == manifest.get('name')]
+    if len(listed) != 1 or listed[0].get('source') != './':
+        errors.append('Marketplace must list this plugin once with source ./')
+    for p in root.rglob('*'):
+        if p.is_symlink():
+            errors.append(f'Symlink not allowed: {p.relative_to(root)}')
+    seen = set()
+    entries = list((root / 'skills').glob('*/SKILL.md'))
+    for p in entries:
+        text = p.read_text(encoding='utf-8')
+        try:
+            if not text.startswith('---\n'):
+                raise ValueError('Missing YAML frontmatter')
+            meta = yaml.safe_load(text.split('---', 2)[1])
+            name = meta['name']
+            if name != p.parent.name or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name):
+                raise ValueError('Skill name must match its folder')
+            if name in seen or not isinstance(meta.get('description'), str) or not meta['description'].strip():
+                raise ValueError('Duplicate name or missing description')
+            if set(meta) - ALLOWED_FRONTMATTER:
+                raise ValueError(f'Unexpected frontmatter keys: {sorted(set(meta) - ALLOWED_FRONTMATTER)}')
+            if (meta.get('disable-model-invocation') is True) == (name in MODEL_INVOCABLE):
+                raise ValueError('Invocation policy does not match MODEL_INVOCABLE')
+            seen.add(name)
+        except (KeyError, ValueError, TypeError, yaml.YAMLError) as exc:
+            errors.append(f'{p.relative_to(root)}: {exc}')
+    for p in root.rglob('*.md'):
+        text = p.read_text(encoding='utf-8')
+        # Ignore fenced examples, which can contain illustrative links.
+        text = re.sub(r'```.*?```', '', text, flags=re.S)
+        for link in re.findall(r'\[[^\]\n]*\]\(([^)\n]+)\)', text):
+            link = link.strip().strip('<>')
+            if urlsplit(link).scheme or link.startswith('#'):
+                continue
+            target = (p.parent / unquote(link.split('#', 1)[0])).resolve()
+            if not target.is_relative_to(root) or not target.exists():
+                errors.append(f'{p.relative_to(root)}: missing/escaping link {link}')
+    # The runnable workflows must not depend on removed hosts or hard-coded model IDs.
+    forbidden = re.compile(r'\.cursor[/\\]|codex|spawn_agent|openai\.yaml|\.agents[/\\]|cloud_base_branch|grok-\d|claude-(?:opus|sonnet|haiku|fable)-\d|/add-plugin|cursor-team-kit|bugbot', re.I)
+    for p in (root / 'skills').rglob('*.md'):
+        if forbidden.search(p.read_text(encoding='utf-8')):
+            errors.append(f'Unsupported host reference: {p.relative_to(root)}')
+    schema = json.loads((root / 'skills/poteto-mode/references/config.schema.json').read_text(encoding='utf-8'))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    for cfg in [root / 'config.defaults.json'] + ([config] if config else []):
+        try:
+            jsonschema.validate(json.loads(cfg.read_text(encoding='utf-8')), schema)
+        except (ValueError, jsonschema.ValidationError) as exc:
+            errors.append(f'Invalid configuration {cfg}: {exc.message if hasattr(exc, "message") else exc}')
+    if not entries:
+        errors.append('No skill entrypoints found')
+    return {'skills': len(entries), 'playbooks': len(list((root / 'skills/poteto-mode/playbooks').glob('*.md'))), 'errors': errors}
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--config', type=Path)
+    args = parser.parse_args()
+    result = validate(args.root, args.config)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.exit(bool(result['errors']))

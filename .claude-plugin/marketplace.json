@@ -1,0 +1,12 @@
+{
+  "name": "pstack-local",
+  "owner": { "name": "puremars2015" },
+  "plugins": [
+    {
+      "name": "pstack",
+      "source": "./",
+      "description": "pstack 工程原則、工作流程與實用技能(Claude Code 版)",
+      "category": "development"
+    }
+  ]
+}
