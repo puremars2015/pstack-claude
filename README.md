@@ -11,10 +11,10 @@
 
 ## 安裝
 
-從 GitHub 安裝:
+從 GitHub 安裝(私人 repository,需要該機器上有可存取此 repo 的 Git 登入憑證):
 
 ```sh
-claude plugin marketplace add <owner>/<repo>
+claude plugin marketplace add puremars2015/pstack-claude
 claude plugin install pstack@pstack-local
 ```
 
